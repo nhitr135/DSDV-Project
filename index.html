@@ -33,81 +33,90 @@
     const { useState, useMemo, useEffect, useRef } = React;
 
     /* ================================================================
-       UTILS
+       UTILS  (from utils.ts — full covariance-matrix implementation)
     ================================================================ */
     function cn(...inputs) {
-      return inputs.flat(Infinity).filter(x => typeof x === 'string' && x).join(' ');
-    }
-
-    function calculateCorrelation(x, y) {
-      const n = x.length;
-      if (n !== y.length || n === 0) return 0;
-      const sumX  = x.reduce((a, b) => a + b, 0);
-      const sumY  = y.reduce((a, b) => a + b, 0);
-      const sumXY = x.reduce((a, b, i) => a + b * y[i], 0);
-      const sumX2 = x.reduce((a, b) => a + b * b, 0);
-      const sumY2 = y.reduce((a, b) => a + b * b, 0);
-      const num   = n * sumXY - sumX * sumY;
-      const den   = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
-      return den === 0 ? 0 : num / den;
+      return inputs.filter(Boolean).join(' ');
     }
 
     function calculateStandardDeviation(values) {
-      const n = values.length;
+      if (values.length === 0) return 0;
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+      return Math.sqrt(variance);
+    }
+
+    function calculateCorrelation(a, b) {
+      const n = Math.min(a.length, b.length);
       if (n === 0) return 0;
-      const mean = values.reduce((a, b) => a + b, 0) / n;
-      return Math.sqrt(values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n);
-    }
-
-    function calculatePortfolioRisk(assetReturns, weights) {
-      if (!assetReturns.length) return 0;
-      const numDays = assetReturns[0].length;
-      const daily = [];
-      for (let d = 0; d < numDays; d++) {
-        let day = 0;
-        for (let a = 0; a < assetReturns.length; a++) day += assetReturns[a][d] * weights[a];
-        daily.push(day);
+      const meanA = a.slice(0, n).reduce((s, v) => s + v, 0) / n;
+      const meanB = b.slice(0, n).reduce((s, v) => s + v, 0) / n;
+      let num = 0, denomA = 0, denomB = 0;
+      for (let i = 0; i < n; i++) {
+        const da = a[i] - meanA, db = b[i] - meanB;
+        num += da * db; denomA += da * da; denomB += db * db;
       }
-      return calculateStandardDeviation(daily);
+      const denom = Math.sqrt(denomA * denomB);
+      return denom === 0 ? 0 : num / denom;
     }
 
-    function getCorrelationInsight(a1, a2, r) {
-      const abs = Math.abs(r);
-      if (a1 === a2) return 'This is the same asset (perfect correlation).';
-      if (r   >  0.8) return `${a1} and ${a2} move almost perfectly together → You might be facing "double risk" if both drop.`;
-      if (r   >  0.5) return `${a1} and ${a2} have a strong positive relationship → They tend to follow the same market trends.`;
-      if (r   < -0.5) return `${a1} and ${a2} move in opposite directions → This provides excellent hedging for your portfolio.`;
-      if (abs <  0.2) return `${a1} and ${a2} have very little correlation → This is great for diversification.`;
-      return `${a1} and ${a2} have a moderate relationship.`;
-    }
-
-    function generatePortfolioInsights(assets) {
-      const insights = [];
-      let highCorrCount = 0, totalPairs = 0;
-      const highCorrPairs = [];
-      for (let i = 0; i < assets.length; i++) {
-        for (let j = i + 1; j < assets.length; j++) {
-          totalPairs++;
-          const r = calculateCorrelation(assets[i].returns, assets[j].returns);
-          if (r > 0.6) { highCorrCount++; highCorrPairs.push(`${assets[i].symbol} & ${assets[j].symbol}`); }
+    // Full covariance-matrix portfolio risk (from utils.ts)
+    function calculatePortfolioRisk(assetReturns, weights) {
+      const n = assetReturns.length;
+      if (n === 0) return 0;
+      const stds = assetReturns.map(r => calculateStandardDeviation(r));
+      let variance = 0;
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const corr = i === j ? 1 : calculateCorrelation(assetReturns[i], assetReturns[j]);
+          variance += weights[i] * weights[j] * stds[i] * stds[j] * corr;
         }
       }
-      const ratio = totalPairs > 0 ? highCorrCount / totalPairs : 0;
-      if (ratio > 0.6) {
-        insights.push(`Warning: ${Math.round(ratio * 100)}% of your asset pairs have high correlation.`);
-        insights.push('Your portfolio is not well diversified; many assets may drop at the same time.');
-      } else if (ratio < 0.2) {
-        insights.push('Great job! Your portfolio has low internal correlation, providing good diversification.');
-      } else {
-        insights.push('Your portfolio has a balanced mix of correlated and independent assets.');
+      return Math.sqrt(Math.max(0, variance));
+    }
+
+    // Rich correlation insight (from utils.ts)
+    function getCorrelationInsight(symbolA, symbolB, r) {
+      const abs = Math.abs(r);
+      const direction = r > 0 ? 'tend to move in the same direction' : 'tend to move in opposite directions';
+      if (abs > 0.9) return `${symbolA} and ${symbolB} are highly synchronised — they ${direction}. Holding both offers little diversification.`;
+      if (abs > 0.7) return `${symbolA} and ${symbolB} are strongly correlated and ${direction} most of the time. Consider reducing overlap.`;
+      if (abs > 0.4) return `${symbolA} and ${symbolB} share a moderate relationship and ${direction} more often than not.`;
+      if (abs > 0.2) return `${symbolA} and ${symbolB} have a weak link — they ${direction} only occasionally.`;
+      return `${symbolA} and ${symbolB} are largely independent. Holding both genuinely diversifies your portfolio.`;
+    }
+
+    // Rich portfolio insights (from utils.ts)
+    function generatePortfolioInsights(assets) {
+      const insights = [];
+      if (assets.length < 2) return ['Add more assets to unlock portfolio insights.'];
+      const totalWeight = assets.reduce((s, a) => s + a.weight, 0) || 1;
+      const normalizedWeights = assets.map(a => a.weight / totalWeight);
+      const maxWeight = Math.max(...normalizedWeights);
+      if (maxWeight > 0.5) {
+        const heaviest = assets[normalizedWeights.indexOf(maxWeight)];
+        insights.push(`⚠️ ${heaviest.symbol} makes up over 50% of your portfolio — consider rebalancing.`);
       }
-      if (highCorrPairs.length > 0)
-        insights.push(`Major risk overlap detected between: ${highCorrPairs.slice(0, 2).join(', ')}.`);
+      let totalCorr = 0, pairs = 0;
+      for (let i = 0; i < assets.length; i++)
+        for (let j = i + 1; j < assets.length; j++) {
+          totalCorr += Math.abs(calculateCorrelation(assets[i].returns, assets[j].returns));
+          pairs++;
+        }
+      const avgCorr = pairs > 0 ? totalCorr / pairs : 0;
+      if (avgCorr > 0.75)      insights.push('🔴 Assets are highly correlated — your portfolio may not be well-diversified.');
+      else if (avgCorr > 0.5)  insights.push('🟡 Moderate correlation detected. Some diversification benefit exists.');
+      else                     insights.push('🟢 Low average correlation — your portfolio benefits from strong diversification.');
+      const vols = assets.map(a => calculateStandardDeviation(a.returns));
+      const maxVol = Math.max(...vols);
+      const highVolAsset = assets[vols.indexOf(maxVol)];
+      if (maxVol > 0.025)
+        insights.push(`📊 ${highVolAsset.symbol} is the most volatile asset (daily σ ≈ ${(maxVol * 100).toFixed(1)}%).`);
       return insights;
     }
 
     /* ================================================================
-       CONSTANTS
+       CONSTANTS  (from constants.ts)
     ================================================================ */
     function CORRELATION_INTERPRETATION(r) {
       const a = Math.abs(r);
@@ -118,10 +127,14 @@
       return { description: 'These assets move independently of each other.' };
     }
 
+    // Price-path simulation (from constants.ts — more realistic than the original)
     function generateMockReturns(drift, volatility, days) {
       const returns = [];
+      let price = 100;
       for (let i = 0; i < days; i++) {
-        returns.push(drift + volatility * (Math.random() - 0.5) * 2);
+        const dailyReturn = drift + volatility * (Math.random() - 0.5) * 2;
+        price *= (1 + dailyReturn);
+        returns.push(dailyReturn);
       }
       return returns;
     }
@@ -134,7 +147,7 @@
     ];
 
     /* ================================================================
-       SVG ICON COMPONENTS  (replaces lucide-react)
+       SVG ICON COMPONENTS
     ================================================================ */
     function SvgIcon({ cls, children }) {
       return (
@@ -146,6 +159,7 @@
       );
     }
     const TrendingUpIcon    = ({className:c}) => <SvgIcon cls={c}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></SvgIcon>;
+    const TrendingDownIcon  = ({className:c}) => <SvgIcon cls={c}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></SvgIcon>;
     const ShieldAlertIcon   = ({className:c}) => <SvgIcon cls={c}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></SvgIcon>;
     const InfoIcon          = ({className:c}) => <SvgIcon cls={c}><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></SvgIcon>;
     const PlusIcon          = ({className:c}) => <SvgIcon cls={c}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></SvgIcon>;
@@ -157,7 +171,6 @@
     const GitCompareIcon    = ({className:c}) => <SvgIcon cls={c}><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></SvgIcon>;
     const PieChartIcon      = ({className:c}) => <SvgIcon cls={c}><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></SvgIcon>;
     const BarChart2Icon     = ({className:c}) => <SvgIcon cls={c}><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></SvgIcon>;
-    const TrendingDownIcon  = ({className:c}) => <SvgIcon cls={c}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></SvgIcon>;
     const AlertTriangleIcon = ({className:c}) => <SvgIcon cls={c}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></SvgIcon>;
 
     /* ================================================================
@@ -254,7 +267,7 @@
     }
 
     /* ================================================================
-       CORRELATION NETWORK  (D3 force simulation)
+       CORRELATION NETWORK  (D3 force)
     ================================================================ */
     function CorrelationNetwork({ assets }) {
       const ref = useRef(null);
@@ -317,7 +330,7 @@
     }
 
     /* ================================================================
-       ANIMATED BAR  (replicates motion.div width-from-0 in AssetContribution)
+       ANIMATED BAR  (replaces motion.div from AssetContribution.tsx)
     ================================================================ */
     function AnimatedBar({ item, delay }) {
       const [width, setWidth] = useState(0);
@@ -347,7 +360,7 @@
     }
 
     /* ================================================================
-       ASSET CONTRIBUTION
+       ASSET CONTRIBUTION  (from AssetContribution.tsx)
     ================================================================ */
     function AssetContribution({ assets }) {
       const contributions = useMemo(() => {
@@ -359,20 +372,21 @@
         const baseRisk = calculatePortfolioRisk(assets.map(a => a.returns), norm);
 
         const marginals = assets.map((asset, i) => {
-          const tw = norm.map((w, j) => {
+          const tweakedWeights = norm.map((w, j) => {
             if (j === i) return 0;
-            const rem = norm.reduce((s, ww, jj) => jj !== i ? s + ww : s, 0);
-            return rem === 0 ? 1 / (assets.length - 1) : w / rem;
+            const remaining = norm.reduce((s, ww, jj) => jj !== i ? s + ww : s, 0);
+            return remaining === 0 ? 1 / (assets.length - 1) : w / remaining;
           });
-          const marginal = Math.max(0, baseRisk - calculatePortfolioRisk(assets.map(a => a.returns), tw));
+          const riskWithout = calculatePortfolioRisk(assets.map(a => a.returns), tweakedWeights);
+          const marginal = Math.max(0, baseRisk - riskWithout);
           return { asset, marginal };
         });
 
-        const total = marginals.reduce((s, c) => s + c.marginal, 0) || 1;
+        const totalMarginal = marginals.reduce((s, c) => s + c.marginal, 0) || 1;
         return marginals.map(c => ({
           asset:        c.asset,
-          contribution: c.marginal / total,
-          pct:          Math.round((c.marginal / total) * 100),
+          contribution: c.marginal / totalMarginal,
+          pct:          Math.round((c.marginal / totalMarginal) * 100),
           volatility:   calculateStandardDeviation(c.asset.returns) * 100,
         })).sort((a, b) => b.contribution - a.contribution);
       }, [assets]);
@@ -414,14 +428,14 @@
     }
 
     /* ================================================================
-       STRESS TEST
+       STRESS TEST  (from StressTest.tsx)
     ================================================================ */
     const SCENARIOS = [
-      { id: 'covid',        name: 'COVID Crash',      emoji: '🦠', description: 'March 2020 market collapse. Tech fell hard, Bitcoin crashed 50%.', color: 'text-red-600',     bgColor: 'bg-red-50 border-red-200',       shocks: { AAPL:-0.32,GOOGL:-0.31,TSLA:-0.61,BTC:-0.50,ETH:-0.55,MSFT:-0.28,AMZN:-0.19,NVDA:-0.35,META:-0.29,GOLD:-0.12 }, globalShock:-0.30 },
-      { id: 'rate_hike',    name: '2022 Rate Hike',   emoji: '📈', description: 'Fed aggressively raised rates. Growth stocks & crypto crashed.',   color: 'text-orange-600',  bgColor: 'bg-orange-50 border-orange-200', shocks: { AAPL:-0.27,GOOGL:-0.39,TSLA:-0.65,BTC:-0.64,ETH:-0.68,MSFT:-0.28,AMZN:-0.50,NVDA:-0.50,META:-0.64,GOLD:-0.02 }, globalShock:-0.35 },
-      { id: 'bull_run',     name: 'Bull Market Run',  emoji: '🚀', description: '2023 AI-driven rally. Tech soared, crypto recovered strongly.',    color: 'text-emerald-600', bgColor: 'bg-emerald-50 border-emerald-200', shocks: { AAPL:0.48,GOOGL:0.52,TSLA:0.66,BTC:1.55,ETH:0.85,MSFT:0.56,AMZN:0.81,NVDA:2.40,META:1.94,GOLD:0.13 },    globalShock: 0.40 },
-      { id: 'stagflation',  name: 'Stagflation Shock', emoji: '⚡', description: 'High inflation + slow growth. Bad for equities, mixed for crypto.', color: 'text-yellow-600', bgColor: 'bg-yellow-50 border-yellow-200', shocks: { AAPL:-0.18,GOOGL:-0.22,TSLA:-0.30,BTC:-0.20,ETH:-0.25,MSFT:-0.15,AMZN:-0.25,NVDA:-0.20,META:-0.28,GOLD:0.15 },  globalShock:-0.20 },
-      { id: 'crypto_winter',name: 'Crypto Winter',    emoji: '❄️', description: '2018-style crypto collapse. BTC -80%, stocks hold relatively steady.', color: 'text-blue-600', bgColor: 'bg-blue-50 border-blue-200',    shocks: { AAPL:-0.05,GOOGL:-0.07,TSLA:-0.10,BTC:-0.83,ETH:-0.94,MSFT:-0.04,AMZN:-0.08,NVDA:-0.56,META:-0.12,GOLD:0.05 }, globalShock:-0.10 },
+      { id: 'covid',         name: 'COVID Crash',       emoji: '🦠', description: 'March 2020 market collapse. Tech fell hard, Bitcoin crashed 50%.', color: 'text-red-600',     bgColor: 'bg-red-50 border-red-200',         shocks: { AAPL:-0.32,GOOGL:-0.31,TSLA:-0.61,BTC:-0.50,ETH:-0.55,MSFT:-0.28,AMZN:-0.19,NVDA:-0.35,META:-0.29,GOLD:-0.12 }, globalShock:-0.30 },
+      { id: 'rate_hike',     name: '2022 Rate Hike',    emoji: '📈', description: 'Fed aggressively raised rates. Growth stocks & crypto crashed.',   color: 'text-orange-600',  bgColor: 'bg-orange-50 border-orange-200',   shocks: { AAPL:-0.27,GOOGL:-0.39,TSLA:-0.65,BTC:-0.64,ETH:-0.68,MSFT:-0.28,AMZN:-0.50,NVDA:-0.50,META:-0.64,GOLD:-0.02 }, globalShock:-0.35 },
+      { id: 'bull_run',      name: 'Bull Market Run',   emoji: '🚀', description: '2023 AI-driven rally. Tech soared, crypto recovered strongly.',    color: 'text-emerald-600', bgColor: 'bg-emerald-50 border-emerald-200', shocks: { AAPL:0.48,GOOGL:0.52,TSLA:0.66,BTC:1.55,ETH:0.85,MSFT:0.56,AMZN:0.81,NVDA:2.40,META:1.94,GOLD:0.13 },    globalShock: 0.40 },
+      { id: 'stagflation',   name: 'Stagflation Shock', emoji: '⚡', description: 'High inflation + slow growth. Bad for equities, mixed for crypto.', color: 'text-yellow-600', bgColor: 'bg-yellow-50 border-yellow-200',   shocks: { AAPL:-0.18,GOOGL:-0.22,TSLA:-0.30,BTC:-0.20,ETH:-0.25,MSFT:-0.15,AMZN:-0.25,NVDA:-0.20,META:-0.28,GOLD:0.15 }, globalShock:-0.20 },
+      { id: 'crypto_winter', name: 'Crypto Winter',     emoji: '❄️', description: '2018-style crypto collapse. BTC -80%, stocks hold relatively steady.', color: 'text-blue-600', bgColor: 'bg-blue-50 border-blue-200',    shocks: { AAPL:-0.05,GOOGL:-0.07,TSLA:-0.10,BTC:-0.83,ETH:-0.94,MSFT:-0.04,AMZN:-0.08,NVDA:-0.56,META:-0.12,GOLD:0.05 }, globalShock:-0.10 },
     ];
 
     function StressTest({ assets }) {
@@ -449,6 +463,7 @@
             </div>
           </div>
 
+          {/* Scenario selector */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">
             {SCENARIOS.map(s => (
               <button key={s.id}
@@ -457,27 +472,34 @@
                   selected?.id === s.id ? s.bgColor + ' shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
                 )}>
                 <div className="text-lg mb-1">{s.emoji}</div>
-                <div className={cn('text-[10px] font-black uppercase tracking-tight', selected?.id === s.id ? s.color : 'text-slate-600')}>{s.name}</div>
+                <div className={cn('text-[10px] font-black uppercase tracking-tight',
+                  selected?.id === s.id ? s.color : 'text-slate-600')}>{s.name}</div>
               </button>
             ))}
           </div>
 
           {selected && results ? (
             <div key={selected.id} className="animate-enter">
+              {/* Scenario description */}
               <div className={cn('p-3 rounded-xl border mb-4 flex items-start gap-2', selected.bgColor)}>
                 <AlertTriangleIcon className={cn('w-3.5 h-3.5 mt-0.5 shrink-0', selected.color)} />
                 <p className={cn('text-[10px] font-medium leading-relaxed', selected.color)}>{selected.description}</p>
               </div>
 
+              {/* Total impact banner */}
               <div className={cn('rounded-2xl p-4 mb-4 text-center', isPositive ? 'bg-emerald-600' : 'bg-red-600')}>
                 <div className="text-white/70 text-[10px] font-bold uppercase tracking-widest mb-1">Estimated Portfolio Impact</div>
                 <div className="text-white text-4xl font-black">{isPositive ? '+' : ''}{(totalImpact * 100).toFixed(1)}%</div>
-                <div className="text-white/60 text-[10px] mt-1">{isPositive ? 'Estimated gain' : 'Estimated loss'} across your weighted portfolio</div>
+                <div className="text-white/60 text-[10px] mt-1">
+                  {isPositive ? 'Estimated gain' : 'Estimated loss'} across your weighted portfolio
+                </div>
               </div>
 
+              {/* Per-asset breakdown */}
               <div className="space-y-2">
                 {[...results].sort((a, b) => a.shock - b.shock).map((r, i) => (
-                  <div key={r.asset.id} className="flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl animate-slide-in"
+                  <div key={r.asset.id}
+                    className="flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl animate-slide-in"
                     style={{animationDelay: `${i * 0.04}s`}}>
                     <div className="w-6 h-6 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0"
                       style={{backgroundColor: r.asset.color}}>{r.asset.symbol[0]}</div>
@@ -486,13 +508,16 @@
                       <div className={cn('h-full rounded-full', r.shock >= 0 ? 'bg-emerald-500' : 'bg-red-500')}
                         style={{width: `${Math.min(100, Math.abs(r.shock) * 100)}%`}} />
                     </div>
-                    <span className={cn('text-xs font-black w-14 text-right shrink-0', r.shock >= 0 ? 'text-emerald-600' : 'text-red-600')}>
+                    <span className={cn('text-xs font-black w-14 text-right shrink-0',
+                      r.shock >= 0 ? 'text-emerald-600' : 'text-red-600')}>
                       {r.shock >= 0 ? '+' : ''}{(r.shock * 100).toFixed(0)}%
                     </span>
                   </div>
                 ))}
               </div>
-              <p className="text-[9px] text-slate-400 mt-3 text-center">Based on historical market data. Actual results may vary.</p>
+              <p className="text-[9px] text-slate-400 mt-3 text-center">
+                Based on historical market data. Actual results may vary.
+              </p>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-6 border-2 border-dashed border-slate-100 rounded-2xl bg-slate-50/50">
@@ -505,7 +530,7 @@
     }
 
     /* ================================================================
-       PORTFOLIO COMPARISON
+       PORTFOLIO COMPARISON  (from PortfolioComparison.tsx)
     ================================================================ */
     const PRESET_PORTFOLIOS = [
       { name: 'Tech Heavy',   emoji: '💻', weights: { AAPL:0.35, GOOGL:0.30, TSLA:0.25, BTC:0.10 } },
@@ -517,16 +542,25 @@
     function computePortfolioStats(assets, weights) {
       const valid = assets.filter(a => weights[a.symbol] !== undefined);
       if (!valid.length) return { risk: 0, avgReturn: 0, diversificationScore: 0, sharpe: 0 };
-      const totalW = Object.values(weights).reduce((s, w) => s + w, 0) || 1;
-      const norm   = valid.map(a => (weights[a.symbol] || 0) / totalW);
-      const risk   = calculatePortfolioRisk(valid.map(a => a.returns), norm);
-      const avgRet = valid.reduce((s, a, i) => s + (a.returns.reduce((x, y) => x + y, 0) / a.returns.length) * norm[i], 0) * 252;
+      const totalW  = Object.values(weights).reduce((s, w) => s + w, 0) || 1;
+      const norm    = valid.map(a => (weights[a.symbol] || 0) / totalW);
+      const risk    = calculatePortfolioRisk(valid.map(a => a.returns), norm);
+      const avgRet  = valid.reduce((s, a, i) =>
+        s + (a.returns.reduce((x, y) => x + y, 0) / a.returns.length) * norm[i], 0) * 252;
       let totalCorr = 0, pairs = 0;
       for (let i = 0; i < valid.length; i++)
-        for (let j = i + 1; j < valid.length; j++) { totalCorr += Math.abs(calculateCorrelation(valid[i].returns, valid[j].returns)); pairs++; }
-      const divScore  = Math.round((1 - (pairs > 0 ? totalCorr / pairs : 0)) * 100);
-      const annRisk   = risk * Math.sqrt(252);
-      return { risk: annRisk * 100, avgReturn: avgRet * 100, diversificationScore: divScore, sharpe: annRisk > 0 ? (avgRet - 0.04) / annRisk : 0 };
+        for (let j = i + 1; j < valid.length; j++) {
+          totalCorr += Math.abs(calculateCorrelation(valid[i].returns, valid[j].returns));
+          pairs++;
+        }
+      const divScore = Math.round((1 - (pairs > 0 ? totalCorr / pairs : 0)) * 100);
+      const annRisk  = risk * Math.sqrt(252);
+      return {
+        risk:                annRisk * 100,
+        avgReturn:           avgRet  * 100,
+        diversificationScore: divScore,
+        sharpe:              annRisk > 0 ? (avgRet - 0.04) / annRisk : 0,
+      };
     }
 
     function PortfolioComparison({ currentAssets, currentWeights }) {
@@ -535,13 +569,13 @@
       const sB = useMemo(() => computePortfolioStats(currentAssets, preset.weights),  [currentAssets, preset]);
 
       const metrics = [
-        { label: 'Annual Risk',      a: sA.risk.toFixed(1) + '%',  b: sB.risk.toFixed(1) + '%',  better: sA.risk < sB.risk ? 'A' : sB.risk < sA.risk ? 'B' : null },
-        { label: 'Exp. Return',      a: (sA.avgReturn > 0 ? '+' : '') + sA.avgReturn.toFixed(1) + '%', b: (sB.avgReturn > 0 ? '+' : '') + sB.avgReturn.toFixed(1) + '%', better: sA.avgReturn > sB.avgReturn ? 'A' : sB.avgReturn > sA.avgReturn ? 'B' : null },
-        { label: 'Diversification',  a: sA.diversificationScore + '/100', b: sB.diversificationScore + '/100', better: sA.diversificationScore > sB.diversificationScore ? 'A' : sB.diversificationScore > sA.diversificationScore ? 'B' : null },
-        { label: 'Sharpe Ratio',     a: sA.sharpe.toFixed(2),       b: sB.sharpe.toFixed(2),      better: sA.sharpe > sB.sharpe ? 'A' : sB.sharpe > sA.sharpe ? 'B' : null },
+        { label: 'Annual Risk',     a: sA.risk.toFixed(1) + '%',  b: sB.risk.toFixed(1) + '%',  better: sA.risk < sB.risk ? 'A' : sB.risk < sA.risk ? 'B' : null },
+        { label: 'Exp. Return',     a: (sA.avgReturn > 0 ? '+' : '') + sA.avgReturn.toFixed(1) + '%', b: (sB.avgReturn > 0 ? '+' : '') + sB.avgReturn.toFixed(1) + '%', better: sA.avgReturn > sB.avgReturn ? 'A' : sB.avgReturn > sA.avgReturn ? 'B' : null },
+        { label: 'Diversification', a: sA.diversificationScore + '/100', b: sB.diversificationScore + '/100', better: sA.diversificationScore > sB.diversificationScore ? 'A' : sB.diversificationScore > sA.diversificationScore ? 'B' : null },
+        { label: 'Sharpe Ratio',    a: sA.sharpe.toFixed(2),       b: sB.sharpe.toFixed(2),      better: sA.sharpe > sB.sharpe ? 'A' : sB.sharpe > sA.sharpe ? 'B' : null },
       ];
-      const aWins = metrics.filter(m => m.better === 'A').length;
-      const bWins = metrics.filter(m => m.better === 'B').length;
+      const aWins  = metrics.filter(m => m.better === 'A').length;
+      const bWins  = metrics.filter(m => m.better === 'B').length;
       const winner = aWins > bWins ? 'A' : bWins > aWins ? 'B' : null;
 
       return (
@@ -554,6 +588,7 @@
             </div>
           </div>
 
+          {/* Preset selector */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-5">
             {PRESET_PORTFOLIOS.map(p => (
               <button key={p.name} onClick={() => setPreset(p)}
@@ -561,13 +596,16 @@
                   preset.name === p.name ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
                 )}>
                 <div className="text-base mb-0.5">{p.emoji}</div>
-                <div className={cn('text-[9px] font-black uppercase tracking-tight', preset.name === p.name ? 'text-indigo-600' : 'text-slate-500')}>{p.name}</div>
+                <div className={cn('text-[9px] font-black uppercase tracking-tight',
+                  preset.name === p.name ? 'text-indigo-600' : 'text-slate-500')}>{p.name}</div>
               </button>
             ))}
           </div>
 
+          {/* Headers */}
           <div className="grid grid-cols-3 gap-2 mb-3">
-            <div className={cn('rounded-xl p-3 text-center border', winner === 'A' ? 'bg-blue-600 border-blue-600' : 'bg-slate-50 border-slate-200')}>
+            <div className={cn('rounded-xl p-3 text-center border',
+              winner === 'A' ? 'bg-blue-600 border-blue-600' : 'bg-slate-50 border-slate-200')}>
               <div className={cn('text-[10px] font-black uppercase tracking-widest', winner === 'A' ? 'text-white/70' : 'text-slate-400')}>Portfolio A</div>
               <div className={cn('text-xs font-bold', winner === 'A' ? 'text-white' : 'text-slate-600')}>Your Mix</div>
               {winner === 'A' && <div className="text-[8px] text-white/80 font-bold mt-0.5">🏆 WINNER</div>}
@@ -575,23 +613,29 @@
             <div className="flex items-center justify-center">
               <div className="text-[10px] font-black text-slate-300 uppercase tracking-widest">vs</div>
             </div>
-            <div className={cn('rounded-xl p-3 text-center border', winner === 'B' ? 'bg-indigo-600 border-indigo-600' : 'bg-slate-50 border-slate-200')}>
+            <div className={cn('rounded-xl p-3 text-center border',
+              winner === 'B' ? 'bg-indigo-600 border-indigo-600' : 'bg-slate-50 border-slate-200')}>
               <div className={cn('text-[10px] font-black uppercase tracking-widest', winner === 'B' ? 'text-white/70' : 'text-slate-400')}>Portfolio B</div>
               <div className={cn('text-xs font-bold', winner === 'B' ? 'text-white' : 'text-slate-600')}>{preset.emoji} {preset.name}</div>
               {winner === 'B' && <div className="text-[8px] text-white/80 font-bold mt-0.5">🏆 WINNER</div>}
             </div>
           </div>
 
+          {/* Metrics */}
           <div className="space-y-2">
             {metrics.map((m, i) => (
               <div key={m.label} className="grid grid-cols-3 gap-2 items-center"
                 style={{opacity: 0, animation: `fadeSlideUp 0.2s ease ${i * 0.05}s forwards`}}>
-                <div className={cn('p-2.5 rounded-xl text-center border transition-all', m.better === 'A' ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200')}>
+                <div className={cn('p-2.5 rounded-xl text-center border transition-all',
+                  m.better === 'A' ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200')}>
                   <div className={cn('text-sm font-black', m.better === 'A' ? 'text-blue-700' : 'text-slate-600')}>{m.a}</div>
                   {m.better === 'A' && <div className="text-[8px] text-blue-500 font-bold">✓ better</div>}
                 </div>
-                <div className="text-center"><div className="text-[9px] font-bold text-slate-400 uppercase leading-tight">{m.label}</div></div>
-                <div className={cn('p-2.5 rounded-xl text-center border transition-all', m.better === 'B' ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200')}>
+                <div className="text-center">
+                  <div className="text-[9px] font-bold text-slate-400 uppercase leading-tight">{m.label}</div>
+                </div>
+                <div className={cn('p-2.5 rounded-xl text-center border transition-all',
+                  m.better === 'B' ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200')}>
                   <div className={cn('text-sm font-black', m.better === 'B' ? 'text-indigo-700' : 'text-slate-600')}>{m.b}</div>
                   {m.better === 'B' && <div className="text-[8px] text-indigo-500 font-bold">✓ better</div>}
                 </div>
@@ -599,6 +643,7 @@
             ))}
           </div>
 
+          {/* Score summary */}
           <div className="mt-4 pt-4 border-t border-slate-100 flex justify-between items-center">
             <div className="text-center">
               <div className="text-2xl font-black text-blue-600">{aWins}</div>
@@ -620,19 +665,19 @@
     const ASSET_COLORS = ['#60a5fa','#f87171','#fbbf24','#f59e0b','#34d399','#818cf8','#fb923c','#e879f9'];
 
     function App() {
-      const [assets,      setAssets]      = useState(INITIAL_ASSETS);
-      const [activeTab,   setActiveTab]   = useState('overview');
-      const [hovered,     setHovered]     = useState({ a1: null, a2: null, r: null });
-      const [aiText,      setAiText]      = useState('');
-      const [aiLoading,   setAiLoading]   = useState(false);
-      const [apiKey,      setApiKey]      = useState('');
-      const [showKey,     setShowKey]     = useState(false);
+      const [assets,    setAssets]    = useState(INITIAL_ASSETS);
+      const [activeTab, setActiveTab] = useState('overview');
+      const [hovered,   setHovered]   = useState({ a1: null, a2: null, r: null });
+      const [aiText,    setAiText]    = useState('');
+      const [aiLoading, setAiLoading] = useState(false);
+      const [apiKey,    setApiKey]    = useState('');
+      const [showKey,   setShowKey]   = useState(false);
 
       const portfolioRisk = useMemo(() => {
         const returns = assets.map(a => a.returns);
         const weights = assets.map(a => a.weight);
         const total   = weights.reduce((a, b) => a + b, 0);
-        const norm    = total === 0 ? weights : weights.map(w => w / total);
+        const norm    = total === 0 ? weights.map(() => 1 / weights.length) : weights.map(w => w / total);
         return calculatePortfolioRisk(returns, norm);
       }, [assets]);
 
@@ -644,17 +689,20 @@
       }, [assets]);
 
       const handleWeight = (id, val) => setAssets(prev => prev.map(a => a.id === id ? {...a, weight: val} : a));
-      const removeAsset  = (id)     => { if (assets.length > 2) setAssets(prev => prev.filter(a => a.id !== id)); };
-      const addAsset     = () => {
-        const all   = ['MSFT','AMZN','NVDA','META','ETH','GOLD','AAPL','GOOGL','TSLA','BTC'];
-        const used  = new Set(assets.map(a => a.symbol));
+      const removeAsset  = (id) => { if (assets.length > 2) setAssets(prev => prev.filter(a => a.id !== id)); };
+
+      const addAsset = () => {
+        const all  = ['MSFT','AMZN','NVDA','META','ETH','GOLD','AAPL','GOOGL','TSLA','BTC'];
+        const used = new Set(assets.map(a => a.symbol));
         const avail = all.filter(s => !used.has(s));
         const sym   = avail.length ? avail[Math.floor(Math.random() * avail.length)] : all[Math.floor(Math.random() * all.length)];
         setAssets(prev => [...prev, {
-          id: Math.random().toString(36).slice(2, 9),
-          symbol: sym, name: `${sym} Asset`,
-          color: ASSET_COLORS[Math.floor(Math.random() * ASSET_COLORS.length)],
-          weight: 0, returns: generateMockReturns(0.0005, 0.020, 60),
+          id:      Math.random().toString(36).slice(2, 9),
+          symbol:  sym,
+          name:    `${sym} Asset`,
+          color:   ASSET_COLORS[Math.floor(Math.random() * ASSET_COLORS.length)],
+          weight:  0,
+          returns: generateMockReturns(0.0005, 0.020, 60),
         }]);
       };
 
@@ -681,9 +729,9 @@
       useEffect(() => { if (apiKey) runAI(apiKey); }, [assets.length]);
 
       const tabs = [
-        { id:'overview', label:'Overview',    icon: <TrendingUpIcon  className="w-3.5 h-3.5" /> },
-        { id:'stress',   label:'Stress Test', icon: <ZapIcon         className="w-3.5 h-3.5" /> },
-        { id:'compare',  label:'Compare',     icon: <GitCompareIcon  className="w-3.5 h-3.5" /> },
+        { id:'overview', label:'Overview',    icon: <TrendingUpIcon className="w-3.5 h-3.5" /> },
+        { id:'stress',   label:'Stress Test', icon: <ZapIcon        className="w-3.5 h-3.5" /> },
+        { id:'compare',  label:'Compare',     icon: <GitCompareIcon className="w-3.5 h-3.5" /> },
       ];
 
       return (
@@ -843,7 +891,7 @@
                     </div>
                   </section>
 
-                  {/* Health + AI */}
+                  {/* Portfolio Health + AI */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                       <div className="flex items-center gap-2 mb-4">
@@ -899,6 +947,7 @@
                     </div>
                   </div>
 
+                  {/* Asset Contribution */}
                   <AssetContribution assets={assets} />
                 </div>
               )}
