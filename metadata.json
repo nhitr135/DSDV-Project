@@ -1,0 +1,5 @@
+{
+  "name": "Portfolio Pulse: Risk & Correlation Explorer",
+  "description": "A professional-grade portfolio analysis tool that visualizes asset correlations using dynamic heatmaps and calculates total portfolio risk with 'What-if' weight adjustments.",
+  "requestFramePermissions": []
+}

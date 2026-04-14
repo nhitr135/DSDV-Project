@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PortfolioPulse</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes slideInLeft {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    .animate-enter     { animation: fadeSlideUp  0.2s ease forwards; }
+    .animate-slide-in  { animation: slideInLeft  0.3s ease forwards; }
+    .custom-scrollbar::-webkit-scrollbar       { width: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+  </style>
+</head>
+<body class="bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react" data-plugins="transform-nullish-coalescing-operator,transform-optional-chaining">
+    const { useState, useMemo, useEffect, useRef } = React;
+
+    /* ================================================================
+       UTILS
+    ================================================================ */
+    function cn(...inputs) {
+      return inputs.flat(Infinity).filter(x => typeof x === 'string' && x).join(' ');
+    }
+
+    function calculateCorrelation(x, y) {
+      const n = x.length;
+      if (n !== y.length || n === 0) return 0;
+      const sumX  = x.reduce((a, b) => a + b, 0);
+      const sumY  = y.reduce((a, b) => a + b, 0);
+      const sumXY = x.reduce((a, b, i) => a + b * y[i], 0);
+      const sumX2 = x.reduce((a, b) => a + b * b, 0);
+      const sumY2 = y.reduce((a, b) => a + b * b, 0);
+      const num   = n * sumXY - sumX * sumY;
+      const den   = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+      return den === 0 ? 0 : num / den;
+    }
+
+    function calculateStandardDeviation(values) {
+      const n = values.length;
+      if (n === 0) return 0;
+      const mean = values.reduce((a, b) => a + b, 0) / n;
+      return Math.sqrt(values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n);
+    }
+
+    function calculatePortfolioRisk(assetReturns, weights) {
+      if (!assetReturns.length) return 0;
+      const numDays = assetReturns[0].length;
+      const daily = [];
+      for (let d = 0; d < numDays; d++) {
+        let day = 0;
+        for (let a = 0; a < assetReturns.length; a++) day += assetReturns[a][d] * weights[a];
+        daily.push(day);
+      }
+      return calculateStandardDeviation(daily);
+    }
+
+    function getCorrelationInsight(a1, a2, r) {
+      const abs = Math.abs(r);
+      if (a1 === a2) return 'This is the same asset (perfect correlation).';
+      if (r   >  0.8) return `${a1} and ${a2} move almost perfectly together → You might be facing "double risk" if both drop.`;
+      if (r   >  0.5) return `${a1} and ${a2} have a strong positive relationship → They tend to follow the same market trends.`;
+      if (r   < -0.5) return `${a1} and ${a2} move in opposite directions → This provides excellent hedging for your portfolio.`;
+      if (abs <  0.2) return `${a1} and ${a2} have very little correlation → This is great for diversification.`;
+      return `${a1} and ${a2} have a moderate relationship.`;
+    }
+
+    function generatePortfolioInsights(assets) {
+      const insights = [];
+      let highCorrCount = 0, totalPairs = 0;
+      const highCorrPairs = [];
+      for (let i = 0; i < assets.length; i++) {
+        for (let j = i + 1; j < assets.length; j++) {
+          totalPairs++;
+          const r = calculateCorrelation(assets[i].returns, assets[j].returns);
+          if (r > 0.6) { highCorrCount++; highCorrPairs.push(`${assets[i].symbol} & ${assets[j].symbol}`); }
+        }
+      }
+      const ratio = totalPairs > 0 ? highCorrCount / totalPairs : 0;
+      if (ratio > 0.6) {
+        insights.push(`Warning: ${Math.round(ratio * 100)}% of your asset pairs have high correlation.`);
+        insights.push('Your portfolio is not well diversified; many assets may drop at the same time.');
+      } else if (ratio < 0.2) {
+        insights.push('Great job! Your portfolio has low internal correlation, providing good diversification.');
+      } else {
+        insights.push('Your portfolio has a balanced mix of correlated and independent assets.');
+      }
+      if (highCorrPairs.length > 0)
+        insights.push(`Major risk overlap detected between: ${highCorrPairs.slice(0, 2).join(', ')}.`);
+      return insights;
+    }
+
+    /* ================================================================
+       CONSTANTS
+    ================================================================ */
+    function CORRELATION_INTERPRETATION(r) {
+      const a = Math.abs(r);
+      if (a > 0.9) return { description: 'These assets move almost perfectly in sync.' };
+      if (a > 0.7) return { description: 'They follow each other closely most of the time.' };
+      if (a > 0.4) return { description: 'A noticeable relationship, but they often diverge.' };
+      if (a > 0.2) return { description: 'The relationship is slight and unreliable.' };
+      return { description: 'These assets move independently of each other.' };
+    }
+
+    function generateMockReturns(drift, volatility, days) {
+      const returns = [];
+      for (let i = 0; i < days; i++) {
+        returns.push(drift + volatility * (Math.random() - 0.5) * 2);
+      }
+      return returns;
+    }
+
+    const INITIAL_ASSETS = [
+      { id: '1', symbol: 'AAPL',  name: 'Apple Inc.',    color: '#60a5fa', weight: 0.25, returns: generateMockReturns(0.0005, 0.015, 60) },
+      { id: '2', symbol: 'GOOGL', name: 'Alphabet Inc.', color: '#f87171', weight: 0.25, returns: generateMockReturns(0.0004, 0.014, 60) },
+      { id: '3', symbol: 'TSLA',  name: 'Tesla, Inc.',   color: '#fbbf24', weight: 0.25, returns: generateMockReturns(0.0008, 0.030, 60) },
+      { id: '4', symbol: 'BTC',   name: 'Bitcoin',       color: '#f59e0b', weight: 0.25, returns: generateMockReturns(0.0010, 0.040, 60) },
+    ];
+
+    /* ================================================================
+       SVG ICON COMPONENTS  (replaces lucide-react)
+    ================================================================ */
+    function SvgIcon({ cls, children }) {
+      return (
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          className={cls}>
+          {children}
+        </svg>
+      );
+    }
+    const TrendingUpIcon    = ({className:c}) => <SvgIcon cls={c}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></SvgIcon>;
+    const ShieldAlertIcon   = ({className:c}) => <SvgIcon cls={c}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></SvgIcon>;
+    const InfoIcon          = ({className:c}) => <SvgIcon cls={c}><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></SvgIcon>;
+    const PlusIcon          = ({className:c}) => <SvgIcon cls={c}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></SvgIcon>;
+    const Trash2Icon        = ({className:c}) => <SvgIcon cls={c}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></SvgIcon>;
+    const BrainCircuitIcon  = ({className:c}) => <SvgIcon cls={c}><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></SvgIcon>;
+    const LightbulbIcon     = ({className:c}) => <SvgIcon cls={c}><line x1="9" y1="18" x2="15" y2="18"/><line x1="10" y1="22" x2="14" y2="22"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/></SvgIcon>;
+    const ArrowRightIcon    = ({className:c}) => <SvgIcon cls={c}><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></SvgIcon>;
+    const ZapIcon           = ({className:c}) => <SvgIcon cls={c}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></SvgIcon>;
+    const GitCompareIcon    = ({className:c}) => <SvgIcon cls={c}><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></SvgIcon>;
+    const PieChartIcon      = ({className:c}) => <SvgIcon cls={c}><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></SvgIcon>;
+    const BarChart2Icon     = ({className:c}) => <SvgIcon cls={c}><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></SvgIcon>;
+    const TrendingDownIcon  = ({className:c}) => <SvgIcon cls={c}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></SvgIcon>;
+    const AlertTriangleIcon = ({className:c}) => <SvgIcon cls={c}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></SvgIcon>;
+
+    /* ================================================================
+       RISK METER
+    ================================================================ */
+    function RiskMeter({ risk }) {
+      const pct = Math.min(Math.max((risk * 100) / 4, 0), 1) * 100;
+      let label = 'Low Risk', bar = '#10b981', txt = '#6ee7b7';
+      if      (risk > 0.03)  { label = 'High Risk';   bar = '#ef4444'; txt = '#fca5a5'; }
+      else if (risk > 0.015) { label = 'Medium Risk'; bar = '#f59e0b'; txt = '#fcd34d'; }
+      return (
+        <div>
+          <div className="flex justify-between items-end mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-widest" style={{color: txt}}>{label}</span>
+            <span className="text-3xl font-black text-white">{(risk * 100).toFixed(2)}%</span>
+          </div>
+          <div className="h-2.5 rounded-full overflow-hidden mb-1.5" style={{background: 'rgba(255,255,255,0.1)'}}>
+            <div className="h-full rounded-full transition-all duration-500" style={{width: `${pct}%`, backgroundColor: bar}} />
+          </div>
+          <div className="flex justify-between text-[10px] text-slate-500">
+            <span>0%</span><span>Daily Std Dev</span><span>4%+</span>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================
+       CORRELATION MATRIX  (D3)
+    ================================================================ */
+    function CorrelationMatrix({ assets, onCellHover }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (!ref.current || !assets.length) return;
+        const mg = { top: 60, right: 20, bottom: 20, left: 60 };
+        const W = 380 - mg.left - mg.right;
+        const H = 380 - mg.top  - mg.bottom;
+        d3.select(ref.current).selectAll('*').remove();
+        const svg = d3.select(ref.current)
+          .attr('width',  W + mg.left + mg.right)
+          .attr('height', H + mg.top  + mg.bottom)
+          .append('g').attr('transform', `translate(${mg.left},${mg.top})`);
+
+        const labels = assets.map(a => a.symbol);
+        const x   = d3.scaleBand().range([0, W]).domain(labels).padding(0.06);
+        const y   = d3.scaleBand().range([0, H]).domain(labels).padding(0.06);
+        const col = d3.scaleLinear().domain([-1, 0, 1]).range(['#ef4444', '#f8fafc', '#3b82f6']);
+
+        const data = [];
+        assets.forEach(a1 => assets.forEach(a2 =>
+          data.push({ x: a1.symbol, y: a2.symbol, r: calculateCorrelation(a1.returns, a2.returns), a1, a2 })
+        ));
+
+        svg.selectAll('rect').data(data).enter().append('rect')
+          .attr('x', d => x(d.x) ?? 0).attr('y', d => y(d.y) ?? 0)
+          .attr('rx', 5).attr('ry', 5)
+          .attr('width', x.bandwidth()).attr('height', y.bandwidth())
+          .style('fill', d => col(d.r)).style('stroke', '#e2e8f0').style('stroke-width', 1)
+          .on('mouseover', function(ev, d) {
+            d3.select(this).style('stroke', '#1e293b').style('stroke-width', 2.5);
+            onCellHover(d.a1, d.a2, d.r);
+          })
+          .on('mouseleave', function() {
+            d3.select(this).style('stroke', '#e2e8f0').style('stroke-width', 1);
+            onCellHover(null, null, null);
+          });
+
+        svg.selectAll('text.val').data(data).enter().append('text')
+          .attr('x', d => (x(d.x) ?? 0) + x.bandwidth() / 2)
+          .attr('y', d => (y(d.y) ?? 0) + y.bandwidth() / 2)
+          .attr('dy', '.35em').attr('text-anchor', 'middle')
+          .text(d => `${Math.round(d.r * 100)}%`)
+          .style('font-size', '10px').style('font-weight', '700')
+          .style('fill', d => Math.abs(d.r) > 0.5 ? '#fff' : '#1e293b')
+          .style('pointer-events', 'none');
+
+        svg.append('g').attr('transform', 'translate(0,-10)').selectAll('text')
+          .data(labels).enter().append('text')
+          .attr('x', d => (x(d) ?? 0) + x.bandwidth() / 2).attr('y', 0)
+          .attr('text-anchor', 'middle').text(d => d)
+          .style('font-size', '12px').style('font-weight', '700').style('fill', '#64748b');
+
+        svg.append('g').attr('transform', 'translate(-10,0)').selectAll('text')
+          .data(labels).enter().append('text')
+          .attr('x', 0).attr('y', d => (y(d) ?? 0) + y.bandwidth() / 2)
+          .attr('dy', '.35em').attr('text-anchor', 'end').text(d => d)
+          .style('font-size', '12px').style('font-weight', '700').style('fill', '#64748b');
+      }, [assets]);
+
+      return (
+        <div className="flex justify-center bg-white p-3 rounded-xl border border-slate-100 overflow-x-auto">
+          <svg ref={ref} />
+        </div>
+      );
+    }
+
+    /* ================================================================
+       CORRELATION NETWORK  (D3 force simulation)
+    ================================================================ */
+    function CorrelationNetwork({ assets }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (!ref.current || !assets.length) return;
+        const W = 380, H = 280;
+        d3.select(ref.current).selectAll('*').remove();
+        const svg = d3.select(ref.current)
+          .attr('viewBox', `0 0 ${W} ${H}`).attr('width', '100%').attr('height', H);
+
+        const nodes = assets.map(a => ({ id: a.id, symbol: a.symbol, color: a.color }));
+        const links = [];
+        for (let i = 0; i < assets.length; i++)
+          for (let j = i + 1; j < assets.length; j++) {
+            const r = calculateCorrelation(assets[i].returns, assets[j].returns);
+            if (Math.abs(r) > 0.25) links.push({ source: assets[i].id, target: assets[j].id, value: r });
+          }
+
+        const sim = d3.forceSimulation(nodes)
+          .force('link',      d3.forceLink(links).id(d => d.id).distance(90))
+          .force('charge',    d3.forceManyBody().strength(-280))
+          .force('center',    d3.forceCenter(W / 2, H / 2))
+          .force('collision', d3.forceCollide(28));
+
+        const link = svg.append('g').selectAll('line').data(links).join('line')
+          .attr('stroke', d => d.value > 0 ? '#3b82f6' : '#ef4444')
+          .attr('stroke-opacity', 0.55)
+          .attr('stroke-width', d => Math.abs(d.value) * 7);
+
+        const node = svg.append('g').selectAll('g').data(nodes).join('g')
+          .call(d3.drag()
+            .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+            .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+            .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
+          );
+
+        node.append('circle').attr('r', 22).attr('fill', d => d.color).attr('stroke', '#fff').attr('stroke-width', 2.5);
+        node.append('text').text(d => d.symbol)
+          .attr('text-anchor', 'middle').attr('dy', '.35em')
+          .attr('fill', '#fff').style('font-size', '10px').style('font-weight', '700').style('pointer-events', 'none');
+
+        sim.on('tick', () => {
+          link.attr('x1', d => d.source.x ?? 0).attr('y1', d => d.source.y ?? 0)
+              .attr('x2', d => d.target.x ?? 0).attr('y2', d => d.target.y ?? 0);
+          node.attr('transform', d => `translate(${d.x ?? 0},${d.y ?? 0})`);
+        });
+      }, [assets]);
+
+      return (
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Correlation Network</div>
+          <svg ref={ref} style={{display: 'block'}} />
+          <div className="flex justify-center gap-4 text-[10px] text-slate-400 mt-2">
+            <span className="flex items-center gap-1"><span className="inline-block w-3.5 h-0.5 bg-blue-500" />Positive</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3.5 h-0.5 bg-red-500" />Negative</span>
+            <span className="italic">Thickness = Strength</span>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================
+       ANIMATED BAR  (replicates motion.div width-from-0 in AssetContribution)
+    ================================================================ */
+    function AnimatedBar({ item, delay }) {
+      const [width, setWidth] = useState(0);
+      useEffect(() => {
+        const t = setTimeout(() => setWidth(item.pct), 50 + delay * 1000);
+        return () => clearTimeout(t);
+      }, [item.pct, delay]);
+      return (
+        <div className="animate-slide-in" style={{animationDelay: `${delay}s`}}>
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-2">
+              <div className="w-5 h-5 rounded flex items-center justify-center text-[8px] font-bold text-white shadow-sm"
+                style={{backgroundColor: item.asset.color}}>{item.asset.symbol[0]}</div>
+              <span className="text-xs font-bold text-slate-700">{item.asset.symbol}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-slate-400">vol {item.volatility.toFixed(1)}%</span>
+              <span className="text-xs font-black text-slate-800 w-8 text-right">{item.pct}%</span>
+            </div>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-700"
+              style={{width: `${width}%`, backgroundColor: item.asset.color}} />
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================
+       ASSET CONTRIBUTION
+    ================================================================ */
+    function AssetContribution({ assets }) {
+      const contributions = useMemo(() => {
+        const totalWeight = assets.reduce((s, a) => s + a.weight, 0);
+        const norm = totalWeight === 0
+          ? assets.map(() => 1 / assets.length)
+          : assets.map(a => a.weight / totalWeight);
+
+        const baseRisk = calculatePortfolioRisk(assets.map(a => a.returns), norm);
+
+        const marginals = assets.map((asset, i) => {
+          const tw = norm.map((w, j) => {
+            if (j === i) return 0;
+            const rem = norm.reduce((s, ww, jj) => jj !== i ? s + ww : s, 0);
+            return rem === 0 ? 1 / (assets.length - 1) : w / rem;
+          });
+          const marginal = Math.max(0, baseRisk - calculatePortfolioRisk(assets.map(a => a.returns), tw));
+          return { asset, marginal };
+        });
+
+        const total = marginals.reduce((s, c) => s + c.marginal, 0) || 1;
+        return marginals.map(c => ({
+          asset:        c.asset,
+          contribution: c.marginal / total,
+          pct:          Math.round((c.marginal / total) * 100),
+          volatility:   calculateStandardDeviation(c.asset.returns) * 100,
+        })).sort((a, b) => b.contribution - a.contribution);
+      }, [assets]);
+
+      const top  = contributions[0];
+      const top2 = contributions.slice(0, 2);
+      const top2pct = top2.reduce((s, c) => s + c.pct, 0);
+
+      return (
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="p-1.5 bg-orange-50 rounded-lg"><PieChartIcon className="text-orange-500 w-4 h-4" /></div>
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-tight">Risk Contribution</h2>
+              <p className="text-[10px] text-slate-400 font-medium">How much each asset drives portfolio risk</p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {contributions.map((item, i) => (
+              <AnimatedBar key={item.asset.id} item={item} delay={i * 0.05} />
+            ))}
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-slate-100">
+            <div className="flex items-start gap-2 p-3 bg-orange-50 rounded-xl border border-orange-100">
+              <BarChart2Icon className="w-3.5 h-3.5 text-orange-500 mt-0.5 shrink-0" />
+              <p className="text-[10px] text-orange-700 font-medium leading-relaxed">
+                <span className="font-black">{top?.asset.symbol}</span> is your biggest risk driver at{' '}
+                <span className="font-black">{top?.pct}%</span>.{' '}
+                {top2pct > 70
+                  ? `Top 2 assets (${top2.map(c => c.asset.symbol).join(' & ')}) account for ${top2pct}% of portfolio risk.`
+                  : 'Risk is relatively distributed across your portfolio.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================
+       STRESS TEST
+    ================================================================ */
+    const SCENARIOS = [
+      { id: 'covid',        name: 'COVID Crash',      emoji: '🦠', description: 'March 2020 market collapse. Tech fell hard, Bitcoin crashed 50%.', color: 'text-red-600',     bgColor: 'bg-red-50 border-red-200',       shocks: { AAPL:-0.32,GOOGL:-0.31,TSLA:-0.61,BTC:-0.50,ETH:-0.55,MSFT:-0.28,AMZN:-0.19,NVDA:-0.35,META:-0.29,GOLD:-0.12 }, globalShock:-0.30 },
+      { id: 'rate_hike',    name: '2022 Rate Hike',   emoji: '📈', description: 'Fed aggressively raised rates. Growth stocks & crypto crashed.',   color: 'text-orange-600',  bgColor: 'bg-orange-50 border-orange-200', shocks: { AAPL:-0.27,GOOGL:-0.39,TSLA:-0.65,BTC:-0.64,ETH:-0.68,MSFT:-0.28,AMZN:-0.50,NVDA:-0.50,META:-0.64,GOLD:-0.02 }, globalShock:-0.35 },
+      { id: 'bull_run',     name: 'Bull Market Run',  emoji: '🚀', description: '2023 AI-driven rally. Tech soared, crypto recovered strongly.',    color: 'text-emerald-600', bgColor: 'bg-emerald-50 border-emerald-200', shocks: { AAPL:0.48,GOOGL:0.52,TSLA:0.66,BTC:1.55,ETH:0.85,MSFT:0.56,AMZN:0.81,NVDA:2.40,META:1.94,GOLD:0.13 },    globalShock: 0.40 },
+      { id: 'stagflation',  name: 'Stagflation Shock', emoji: '⚡', description: 'High inflation + slow growth. Bad for equities, mixed for crypto.', color: 'text-yellow-600', bgColor: 'bg-yellow-50 border-yellow-200', shocks: { AAPL:-0.18,GOOGL:-0.22,TSLA:-0.30,BTC:-0.20,ETH:-0.25,MSFT:-0.15,AMZN:-0.25,NVDA:-0.20,META:-0.28,GOLD:0.15 },  globalShock:-0.20 },
+      { id: 'crypto_winter',name: 'Crypto Winter',    emoji: '❄️', description: '2018-style crypto collapse. BTC -80%, stocks hold relatively steady.', color: 'text-blue-600', bgColor: 'bg-blue-50 border-blue-200',    shocks: { AAPL:-0.05,GOOGL:-0.07,TSLA:-0.10,BTC:-0.83,ETH:-0.94,MSFT:-0.04,AMZN:-0.08,NVDA:-0.56,META:-0.12,GOLD:0.05 }, globalShock:-0.10 },
+    ];
+
+    function StressTest({ assets }) {
+      const [selected, setSelected] = useState(null);
+
+      const results = useMemo(() => {
+        if (!selected) return null;
+        const totalW = assets.reduce((s, a) => s + a.weight, 0) || 1;
+        return assets.map(asset => {
+          const shock = selected.shocks[asset.symbol] ?? selected.globalShock;
+          return { asset, shock, weightedImpact: (asset.weight / totalW) * shock };
+        });
+      }, [selected, assets]);
+
+      const totalImpact = results?.reduce((s, r) => s + r.weightedImpact, 0) ?? 0;
+      const isPositive  = totalImpact > 0;
+
+      return (
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="p-1.5 bg-red-50 rounded-lg"><ZapIcon className="text-red-500 w-4 h-4" /></div>
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-tight">Stress Test</h2>
+              <p className="text-[10px] text-slate-400 font-medium">Simulate historical market crises on your portfolio</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">
+            {SCENARIOS.map(s => (
+              <button key={s.id}
+                onClick={() => setSelected(prev => prev?.id === s.id ? null : s)}
+                className={cn('p-3 rounded-xl border text-left transition-all',
+                  selected?.id === s.id ? s.bgColor + ' shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                )}>
+                <div className="text-lg mb-1">{s.emoji}</div>
+                <div className={cn('text-[10px] font-black uppercase tracking-tight', selected?.id === s.id ? s.color : 'text-slate-600')}>{s.name}</div>
+              </button>
+            ))}
+          </div>
+
+          {selected && results ? (
+            <div key={selected.id} className="animate-enter">
+              <div className={cn('p-3 rounded-xl border mb-4 flex items-start gap-2', selected.bgColor)}>
+                <AlertTriangleIcon className={cn('w-3.5 h-3.5 mt-0.5 shrink-0', selected.color)} />
+                <p className={cn('text-[10px] font-medium leading-relaxed', selected.color)}>{selected.description}</p>
+              </div>
+
+              <div className={cn('rounded-2xl p-4 mb-4 text-center', isPositive ? 'bg-emerald-600' : 'bg-red-600')}>
+                <div className="text-white/70 text-[10px] font-bold uppercase tracking-widest mb-1">Estimated Portfolio Impact</div>
+                <div className="text-white text-4xl font-black">{isPositive ? '+' : ''}{(totalImpact * 100).toFixed(1)}%</div>
+                <div className="text-white/60 text-[10px] mt-1">{isPositive ? 'Estimated gain' : 'Estimated loss'} across your weighted portfolio</div>
+              </div>
+
+              <div className="space-y-2">
+                {[...results].sort((a, b) => a.shock - b.shock).map((r, i) => (
+                  <div key={r.asset.id} className="flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl animate-slide-in"
+                    style={{animationDelay: `${i * 0.04}s`}}>
+                    <div className="w-6 h-6 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0"
+                      style={{backgroundColor: r.asset.color}}>{r.asset.symbol[0]}</div>
+                    <span className="text-xs font-bold text-slate-700 w-12 shrink-0">{r.asset.symbol}</span>
+                    <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                      <div className={cn('h-full rounded-full', r.shock >= 0 ? 'bg-emerald-500' : 'bg-red-500')}
+                        style={{width: `${Math.min(100, Math.abs(r.shock) * 100)}%`}} />
+                    </div>
+                    <span className={cn('text-xs font-black w-14 text-right shrink-0', r.shock >= 0 ? 'text-emerald-600' : 'text-red-600')}>
+                      {r.shock >= 0 ? '+' : ''}{(r.shock * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[9px] text-slate-400 mt-3 text-center">Based on historical market data. Actual results may vary.</p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-6 border-2 border-dashed border-slate-100 rounded-2xl bg-slate-50/50">
+              <TrendingDownIcon className="text-slate-300 w-8 h-8 mb-2" />
+              <p className="text-xs text-slate-400 text-center">Select a scenario above to see<br />how your portfolio would perform</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================
+       PORTFOLIO COMPARISON
+    ================================================================ */
+    const PRESET_PORTFOLIOS = [
+      { name: 'Tech Heavy',   emoji: '💻', weights: { AAPL:0.35, GOOGL:0.30, TSLA:0.25, BTC:0.10 } },
+      { name: 'Balanced',     emoji: '⚖️', weights: { AAPL:0.25, GOOGL:0.25, TSLA:0.25, BTC:0.25 } },
+      { name: 'Crypto-Heavy', emoji: '₿',  weights: { AAPL:0.10, GOOGL:0.10, TSLA:0.20, BTC:0.60 } },
+      { name: 'Conservative', emoji: '🛡️', weights: { AAPL:0.50, GOOGL:0.40, TSLA:0.05, BTC:0.05 } },
+    ];
+
+    function computePortfolioStats(assets, weights) {
+      const valid = assets.filter(a => weights[a.symbol] !== undefined);
+      if (!valid.length) return { risk: 0, avgReturn: 0, diversificationScore: 0, sharpe: 0 };
+      const totalW = Object.values(weights).reduce((s, w) => s + w, 0) || 1;
+      const norm   = valid.map(a => (weights[a.symbol] || 0) / totalW);
+      const risk   = calculatePortfolioRisk(valid.map(a => a.returns), norm);
+      const avgRet = valid.reduce((s, a, i) => s + (a.returns.reduce((x, y) => x + y, 0) / a.returns.length) * norm[i], 0) * 252;
+      let totalCorr = 0, pairs = 0;
+      for (let i = 0; i < valid.length; i++)
+        for (let j = i + 1; j < valid.length; j++) { totalCorr += Math.abs(calculateCorrelation(valid[i].returns, valid[j].returns)); pairs++; }
+      const divScore  = Math.round((1 - (pairs > 0 ? totalCorr / pairs : 0)) * 100);
+      const annRisk   = risk * Math.sqrt(252);
+      return { risk: annRisk * 100, avgReturn: avgRet * 100, diversificationScore: divScore, sharpe: annRisk > 0 ? (avgRet - 0.04) / annRisk : 0 };
+    }
+
+    function PortfolioComparison({ currentAssets, currentWeights }) {
+      const [preset, setPreset] = useState(PRESET_PORTFOLIOS[1]);
+      const sA = useMemo(() => computePortfolioStats(currentAssets, currentWeights), [currentAssets, currentWeights]);
+      const sB = useMemo(() => computePortfolioStats(currentAssets, preset.weights),  [currentAssets, preset]);
+
+      const metrics = [
+        { label: 'Annual Risk',      a: sA.risk.toFixed(1) + '%',  b: sB.risk.toFixed(1) + '%',  better: sA.risk < sB.risk ? 'A' : sB.risk < sA.risk ? 'B' : null },
+        { label: 'Exp. Return',      a: (sA.avgReturn > 0 ? '+' : '') + sA.avgReturn.toFixed(1) + '%', b: (sB.avgReturn > 0 ? '+' : '') + sB.avgReturn.toFixed(1) + '%', better: sA.avgReturn > sB.avgReturn ? 'A' : sB.avgReturn > sA.avgReturn ? 'B' : null },
+        { label: 'Diversification',  a: sA.diversificationScore + '/100', b: sB.diversificationScore + '/100', better: sA.diversificationScore > sB.diversificationScore ? 'A' : sB.diversificationScore > sA.diversificationScore ? 'B' : null },
+        { label: 'Sharpe Ratio',     a: sA.sharpe.toFixed(2),       b: sB.sharpe.toFixed(2),      better: sA.sharpe > sB.sharpe ? 'A' : sB.sharpe > sA.sharpe ? 'B' : null },
+      ];
+      const aWins = metrics.filter(m => m.better === 'A').length;
+      const bWins = metrics.filter(m => m.better === 'B').length;
+      const winner = aWins > bWins ? 'A' : bWins > aWins ? 'B' : null;
+
+      return (
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="p-1.5 bg-indigo-50 rounded-lg"><GitCompareIcon className="text-indigo-500 w-4 h-4" /></div>
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-tight">Portfolio Comparison</h2>
+              <p className="text-[10px] text-slate-400 font-medium">Your portfolio vs a preset strategy</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-5">
+            {PRESET_PORTFOLIOS.map(p => (
+              <button key={p.name} onClick={() => setPreset(p)}
+                className={cn('p-2.5 rounded-xl border text-center transition-all',
+                  preset.name === p.name ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                )}>
+                <div className="text-base mb-0.5">{p.emoji}</div>
+                <div className={cn('text-[9px] font-black uppercase tracking-tight', preset.name === p.name ? 'text-indigo-600' : 'text-slate-500')}>{p.name}</div>
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            <div className={cn('rounded-xl p-3 text-center border', winner === 'A' ? 'bg-blue-600 border-blue-600' : 'bg-slate-50 border-slate-200')}>
+              <div className={cn('text-[10px] font-black uppercase tracking-widest', winner === 'A' ? 'text-white/70' : 'text-slate-400')}>Portfolio A</div>
+              <div className={cn('text-xs font-bold', winner === 'A' ? 'text-white' : 'text-slate-600')}>Your Mix</div>
+              {winner === 'A' && <div className="text-[8px] text-white/80 font-bold mt-0.5">🏆 WINNER</div>}
+            </div>
+            <div className="flex items-center justify-center">
+              <div className="text-[10px] font-black text-slate-300 uppercase tracking-widest">vs</div>
+            </div>
+            <div className={cn('rounded-xl p-3 text-center border', winner === 'B' ? 'bg-indigo-600 border-indigo-600' : 'bg-slate-50 border-slate-200')}>
+              <div className={cn('text-[10px] font-black uppercase tracking-widest', winner === 'B' ? 'text-white/70' : 'text-slate-400')}>Portfolio B</div>
+              <div className={cn('text-xs font-bold', winner === 'B' ? 'text-white' : 'text-slate-600')}>{preset.emoji} {preset.name}</div>
+              {winner === 'B' && <div className="text-[8px] text-white/80 font-bold mt-0.5">🏆 WINNER</div>}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {metrics.map((m, i) => (
+              <div key={m.label} className="grid grid-cols-3 gap-2 items-center"
+                style={{opacity: 0, animation: `fadeSlideUp 0.2s ease ${i * 0.05}s forwards`}}>
+                <div className={cn('p-2.5 rounded-xl text-center border transition-all', m.better === 'A' ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200')}>
+                  <div className={cn('text-sm font-black', m.better === 'A' ? 'text-blue-700' : 'text-slate-600')}>{m.a}</div>
+                  {m.better === 'A' && <div className="text-[8px] text-blue-500 font-bold">✓ better</div>}
+                </div>
+                <div className="text-center"><div className="text-[9px] font-bold text-slate-400 uppercase leading-tight">{m.label}</div></div>
+                <div className={cn('p-2.5 rounded-xl text-center border transition-all', m.better === 'B' ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200')}>
+                  <div className={cn('text-sm font-black', m.better === 'B' ? 'text-indigo-700' : 'text-slate-600')}>{m.b}</div>
+                  {m.better === 'B' && <div className="text-[8px] text-indigo-500 font-bold">✓ better</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 pt-4 border-t border-slate-100 flex justify-between items-center">
+            <div className="text-center">
+              <div className="text-2xl font-black text-blue-600">{aWins}</div>
+              <div className="text-[9px] text-slate-400 font-bold uppercase">Your wins</div>
+            </div>
+            <div className="text-[10px] text-slate-400 font-medium text-center px-2">out of {metrics.length} metrics</div>
+            <div className="text-center">
+              <div className="text-2xl font-black text-indigo-600">{bWins}</div>
+              <div className="text-[9px] text-slate-400 font-bold uppercase">Preset wins</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================
+       APP  (root component)
+    ================================================================ */
+    const ASSET_COLORS = ['#60a5fa','#f87171','#fbbf24','#f59e0b','#34d399','#818cf8','#fb923c','#e879f9'];
+
+    function App() {
+      const [assets,      setAssets]      = useState(INITIAL_ASSETS);
+      const [activeTab,   setActiveTab]   = useState('overview');
+      const [hovered,     setHovered]     = useState({ a1: null, a2: null, r: null });
+      const [aiText,      setAiText]      = useState('');
+      const [aiLoading,   setAiLoading]   = useState(false);
+      const [apiKey,      setApiKey]      = useState('');
+      const [showKey,     setShowKey]     = useState(false);
+
+      const portfolioRisk = useMemo(() => {
+        const returns = assets.map(a => a.returns);
+        const weights = assets.map(a => a.weight);
+        const total   = weights.reduce((a, b) => a + b, 0);
+        const norm    = total === 0 ? weights : weights.map(w => w / total);
+        return calculatePortfolioRisk(returns, norm);
+      }, [assets]);
+
+      const insights = useMemo(() => generatePortfolioInsights(assets), [assets]);
+
+      const currentWeightsMap = useMemo(() => {
+        const total = assets.reduce((s, a) => s + a.weight, 0) || 1;
+        return Object.fromEntries(assets.map(a => [a.symbol, a.weight / total]));
+      }, [assets]);
+
+      const handleWeight = (id, val) => setAssets(prev => prev.map(a => a.id === id ? {...a, weight: val} : a));
+      const removeAsset  = (id)     => { if (assets.length > 2) setAssets(prev => prev.filter(a => a.id !== id)); };
+      const addAsset     = () => {
+        const all   = ['MSFT','AMZN','NVDA','META','ETH','GOLD','AAPL','GOOGL','TSLA','BTC'];
+        const used  = new Set(assets.map(a => a.symbol));
+        const avail = all.filter(s => !used.has(s));
+        const sym   = avail.length ? avail[Math.floor(Math.random() * avail.length)] : all[Math.floor(Math.random() * all.length)];
+        setAssets(prev => [...prev, {
+          id: Math.random().toString(36).slice(2, 9),
+          symbol: sym, name: `${sym} Asset`,
+          color: ASSET_COLORS[Math.floor(Math.random() * ASSET_COLORS.length)],
+          weight: 0, returns: generateMockReturns(0.0005, 0.020, 60),
+        }]);
+      };
+
+      const runAI = async (key) => {
+        const k = key ?? apiKey;
+        if (!k) { setAiText("Enter your Gemini API key to enable AI analysis."); return; }
+        setAiLoading(true);
+        try {
+          const prompt = `Analyze this portfolio: ${assets.map(a => a.symbol).join(', ')}. Give a professional but simple insight on how these assets interact. Mention if there's a "risk cluster" (e.g. too much tech). Max 2 sentences.`;
+          const res  = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${k}`,
+            { method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] }) }
+          );
+          const json = await res.json();
+          setAiText(json?.candidates?.[0]?.content?.parts?.[0]?.text || 'No insights available.');
+        } catch(e) {
+          setAiText('AI analysis unavailable. Check your API key.');
+        } finally {
+          setAiLoading(false);
+        }
+      };
+
+      useEffect(() => { if (apiKey) runAI(apiKey); }, [assets.length]);
+
+      const tabs = [
+        { id:'overview', label:'Overview',    icon: <TrendingUpIcon  className="w-3.5 h-3.5" /> },
+        { id:'stress',   label:'Stress Test', icon: <ZapIcon         className="w-3.5 h-3.5" /> },
+        { id:'compare',  label:'Compare',     icon: <GitCompareIcon  className="w-3.5 h-3.5" /> },
+      ];
+
+      return (
+        <div className="min-h-screen bg-slate-50 text-slate-900">
+
+          {/* ── Header ── */}
+          <header className="bg-white border-b border-slate-200 px-6 py-4 sticky top-0 z-10">
+            <div className="max-w-7xl mx-auto flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <div className="bg-blue-600 p-2 rounded-lg">
+                  <TrendingUpIcon className="text-white w-6 h-6" />
+                </div>
+                <h1 className="text-xl font-bold tracking-tight text-slate-800">
+                  Portfolio<span className="text-blue-600">Pulse</span>
+                </h1>
+              </div>
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                {tabs.map(t => (
+                  <button key={t.id} onClick={() => setActiveTab(t.id)}
+                    className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
+                      activeTab === t.id ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                    )}>
+                    {t.icon}
+                    <span className="hidden sm:inline">{t.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </header>
+
+          {/* ── Main grid ── */}
+          <main className="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+            {/* Left column — always visible */}
+            <div className="lg:col-span-4 space-y-6">
+
+              {/* Risk meter */}
+              <section className="bg-slate-900 text-white p-6 rounded-3xl shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-5">
+                  <ShieldAlertIcon className="w-32 h-32" />
+                </div>
+                <RiskMeter risk={portfolioRisk} />
+              </section>
+
+              {/* Portfolio weights */}
+              <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    Portfolio Weights
+                    <span className="text-xs font-normal text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{assets.length}</span>
+                  </h2>
+                  <button onClick={addAsset}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg text-xs font-bold transition-colors">
+                    <PlusIcon className="w-3 h-3" /> Add
+                  </button>
+                </div>
+                <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                  {assets.map(asset => (
+                    <div key={asset.id} className="group bg-slate-50 p-4 rounded-xl border border-transparent hover:border-slate-200 transition-all">
+                      <div className="flex justify-between items-start mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white shadow-sm"
+                            style={{backgroundColor: asset.color}}>{asset.symbol[0]}</div>
+                          <div>
+                            <div className="font-bold text-slate-800 text-sm">{asset.symbol}</div>
+                            <div className="text-[10px] text-slate-500 uppercase font-medium">{asset.name}</div>
+                          </div>
+                        </div>
+                        <button onClick={() => removeAsset(asset.id)}
+                          className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-all">
+                          <Trash2Icon className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase">
+                          <span>Weight</span><span>{Math.round(asset.weight * 100)}%</span>
+                        </div>
+                        <input type="range" min="0" max="1" step="0.01" value={asset.weight}
+                          onChange={e => handleWeight(asset.id, parseFloat(e.target.value))}
+                          className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              {/* Correlation network */}
+              <CorrelationNetwork assets={assets} />
+            </div>
+
+            {/* Right column — tab content */}
+            <div className="lg:col-span-8 space-y-6">
+
+              {/* ── OVERVIEW TAB ── */}
+              {activeTab === 'overview' && (
+                <div className="space-y-6 animate-enter">
+
+                  {/* Heatmap */}
+                  <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <div className="mb-6">
+                      <h2 className="text-lg font-semibold">Correlation Heatmap</h2>
+                      <p className="text-sm text-slate-500">Hover to see automated explanations</p>
+                    </div>
+                    <div className="grid grid-cols-1 xl:grid-cols-5 gap-8 items-start">
+                      <div className="xl:col-span-3">
+                        <CorrelationMatrix assets={assets} onCellHover={(a1,a2,r) => setHovered({a1,a2,r})} />
+                      </div>
+                      <div className="xl:col-span-2">
+                        {hovered.a1 && hovered.a2 && hovered.r !== null ? (
+                          <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 animate-enter">
+                            <div className="flex items-center gap-3 mb-4">
+                              <div className="flex -space-x-2">
+                                <div className="w-8 h-8 rounded-full border-2 border-white shadow-sm flex items-center justify-center text-[10px] font-bold text-white"
+                                  style={{backgroundColor: hovered.a1.color}}>{hovered.a1.symbol[0]}</div>
+                                <div className="w-8 h-8 rounded-full border-2 border-white shadow-sm flex items-center justify-center text-[10px] font-bold text-white"
+                                  style={{backgroundColor: hovered.a2.color}}>{hovered.a2.symbol[0]}</div>
+                              </div>
+                              <div className="text-xs font-bold text-slate-500 uppercase tracking-tight">
+                                {hovered.a1.symbol} + {hovered.a2.symbol}
+                              </div>
+                            </div>
+                            <div className="mb-4">
+                              <div className="text-3xl font-black text-slate-900">{Math.round(hovered.r * 100)}%</div>
+                              <div className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Correlation Strength</div>
+                            </div>
+                            <div className="space-y-3">
+                              <div className="p-3 bg-white rounded-xl border border-slate-200 shadow-sm">
+                                <div className="flex items-center gap-2 text-blue-600 mb-1">
+                                  <InfoIcon className="w-3 h-3" />
+                                  <span className="text-[10px] font-bold uppercase">Interpretation</span>
+                                </div>
+                                <p className="text-xs text-slate-700 font-medium leading-relaxed">
+                                  {CORRELATION_INTERPRETATION(hovered.r).description}
+                                </p>
+                              </div>
+                              <div className="p-3 bg-blue-600 rounded-xl shadow-md">
+                                <div className="flex items-center gap-2 text-white/80 mb-1">
+                                  <LightbulbIcon className="w-3 h-3" />
+                                  <span className="text-[10px] font-bold uppercase">Auto-Explanation</span>
+                                </div>
+                                <p className="text-xs text-white font-medium leading-relaxed">
+                                  {getCorrelationInsight(hovered.a1.symbol, hovered.a2.symbol, hovered.r)}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="h-full flex flex-col items-center justify-center text-center p-8 border-2 border-dashed border-slate-100 rounded-2xl bg-slate-50/50">
+                            <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center shadow-sm mb-4">
+                              <ArrowRightIcon className="text-slate-300 w-6 h-6" />
+                            </div>
+                            <h3 className="text-sm font-bold text-slate-400 uppercase mb-1">Interactive Heatmap</h3>
+                            <p className="text-xs text-slate-400 max-w-[180px]">Hover over the matrix to reveal deep asset relationships</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Health + AI */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="p-1.5 bg-emerald-50 rounded-lg"><ShieldAlertIcon className="text-emerald-600 w-4 h-4" /></div>
+                        <h2 className="text-sm font-bold uppercase tracking-tight">Portfolio Health</h2>
+                      </div>
+                      <div className="space-y-3">
+                        {insights.map((txt, i) => (
+                          <div key={i} className="flex items-start gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                            <div className="mt-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                            <p className="text-xs text-slate-700 font-medium leading-relaxed">{txt}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-purple-50 rounded-lg"><BrainCircuitIcon className="text-purple-600 w-4 h-4" /></div>
+                          <h2 className="text-sm font-bold uppercase tracking-tight">AI Market Context</h2>
+                        </div>
+                        <button onClick={() => setShowKey(s => !s)}
+                          className="text-[9px] text-purple-500 font-bold border border-purple-200 rounded px-1.5 py-0.5 hover:bg-purple-50 transition-colors">
+                          {showKey ? 'Hide' : 'API Key'}
+                        </button>
+                      </div>
+                      {showKey && (
+                        <div className="mb-3 flex gap-2">
+                          <input type="password" placeholder="Paste Gemini API key…"
+                            value={apiKey} onChange={e => setApiKey(e.target.value)}
+                            className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-purple-400" />
+                          <button onClick={() => runAI(apiKey)}
+                            className="text-xs bg-purple-600 text-white rounded-lg px-3 py-1.5 font-bold hover:bg-purple-700 transition-colors">
+                            Run
+                          </button>
+                        </div>
+                      )}
+                      <div className={cn('p-4 rounded-xl min-h-[80px] flex flex-col justify-center transition-all',
+                        aiLoading ? 'bg-slate-50 animate-pulse' : 'bg-purple-50/30 border border-purple-100')}>
+                        {aiLoading ? (
+                          <div className="space-y-2">
+                            <div className="h-3 bg-slate-200 rounded w-full" />
+                            <div className="h-3 bg-slate-200 rounded w-2/3" />
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-600 italic leading-relaxed">
+                            "{aiText || "Click 'API Key' to enable Gemini AI analysis."}"
+                          </p>
+                        )}
+                        <div className="mt-2 text-[8px] font-bold text-purple-400 uppercase tracking-widest">Powered by Gemini</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <AssetContribution assets={assets} />
+                </div>
+              )}
+
+              {/* ── STRESS TEST TAB ── */}
+              {activeTab === 'stress' && (
+                <div className="animate-enter">
+                  <StressTest assets={assets} />
+                </div>
+              )}
+
+              {/* ── COMPARE TAB ── */}
+              {activeTab === 'compare' && (
+                <div className="animate-enter">
+                  <PortfolioComparison currentAssets={assets} currentWeights={currentWeightsMap} />
+                </div>
+              )}
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
