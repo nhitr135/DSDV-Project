@@ -195,7 +195,10 @@ Component:
 │   ├── RiskRadar.js
 │   └── TakeawayCards.js
 │
+│
 ├── css/
+│   └── style.css
+│
 ├── App.js
 ├── chartHelpers.js
 ├── constants.js
@@ -204,4 +207,5 @@ Component:
 ├── returns_data.js
 ├── index.html
 ├── package.json
-└── README.md
+├── README.md
+└── TODO.md
